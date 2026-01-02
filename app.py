@@ -3,12 +3,25 @@
 # pip install -r requirements.txt
 
 import os
+import sys
 import warnings
 import logging
 import platform
 import copy
 import itertools
 import string
+import json
+
+# Fix Windows console encoding for Unicode characters
+if platform.system() == 'Windows':
+    try:
+        sys.stdout.reconfigure(encoding='utf-8')
+        sys.stderr.reconfigure(encoding='utf-8')
+    except (AttributeError, ValueError):
+        # Fallback for older Python versions
+        import codecs
+        sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'strict')
+        sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'strict')
 
 import cv2
 import pickle
@@ -41,7 +54,7 @@ try:
     TENSORFLOW_AVAILABLE = True
 except ImportError:
     TENSORFLOW_AVAILABLE = False
-    print("⚠ TensorFlow not installed. Keras model (.h5) will not be available.")
+    print("[WARNING] TensorFlow not installed. Keras model (.h5) will not be available.")
 
 # -----------------------------
 #   FLASK + SOCKET
@@ -54,6 +67,7 @@ socketio = SocketIO(app, cors_allowed_origins="*")
 #   MODEL PATHS
 # -----------------------------
 SKELETON_MODEL_PATH = './model/model.p'
+MODEL_METADATA_PATH = './model/model_metadata.json'
 # Try multiple possible Keras model file names (prioritize new trained model)
 KERAS_MODEL_PATHS = [
     r'D:\sign-to-text-and-speech\model\indian_sign_model.h5',  # New trained model (absolute path)
@@ -70,11 +84,11 @@ skeleton_model = None
 try:
     model_dict = pickle.load(open(SKELETON_MODEL_PATH, 'rb'))
     skeleton_model = model_dict['model']
-    print("✔ Skeleton model (model.p) loaded successfully")
+    print("[OK] Skeleton model (model.p) loaded successfully")
 except FileNotFoundError:
-    print(f"⚠ ISL Skeleton model not found at {SKELETON_MODEL_PATH}")
+    print(f"[WARNING] ISL Skeleton model not found at {SKELETON_MODEL_PATH}")
 except Exception as e:
-        print(f"❌ Error loading ISL skeleton model: {e}")
+        print(f"[ERROR] Error loading ISL skeleton model: {e}")
 
 # -----------------------------
 #   LOAD KERAS LANDMARK MODEL (.h5)
@@ -91,7 +105,7 @@ if TENSORFLOW_AVAILABLE:
                 try:
                     keras_model = keras.models.load_model(model_path, compile=False)
                     keras_model_path_used = model_path
-                    print(f"✔ ISL Keras landmark model ({os.path.basename(model_path)}) loaded successfully")
+                    print(f"[OK] ISL Keras landmark model ({os.path.basename(model_path)}) loaded successfully")
                     break
                 except Exception as load_error:
                     # Handle version compatibility issues with DepthwiseConv2D groups parameter
@@ -113,26 +127,26 @@ if TENSORFLOW_AVAILABLE:
                                 custom_objects={'DepthwiseConv2D': CompatibleDepthwiseConv2D}
                             )
                             keras_model_path_used = model_path
-                            print(f"✔ ISL Keras landmark model ({os.path.basename(model_path)}) loaded successfully (with compatibility fix)")
+                            print(f"[OK] ISL Keras landmark model ({os.path.basename(model_path)}) loaded successfully (with compatibility fix)")
                             break
                         except Exception as e2:
-                            print(f"⚠ Failed to load {model_path}: {e2}")
+                            print(f"[WARNING] Failed to load {model_path}: {e2}")
                             continue
                     else:
-                        print(f"⚠ Failed to load {model_path}: {load_error}")
+                        print(f"[WARNING] Failed to load {model_path}: {load_error}")
                         continue
             except Exception as e:
-                print(f"⚠ Error loading {model_path}: {e}")
+                print(f"[WARNING] Error loading {model_path}: {e}")
                 continue
     
     if keras_model is None:
-        print("⚠ No ISL Keras model found. Tried the following paths:")
+        print("[WARNING] No ISL Keras model found. Tried the following paths:")
         for path in KERAS_MODEL_PATHS:
-            exists = "✓" if os.path.exists(path) else "✗"
+            exists = "[OK]" if os.path.exists(path) else "[NOT FOUND]"
             print(f"   {exists} {path}")
         print("   Continuing without ISL Keras model - ISL skeleton model will be used.")
 else:
-        print("⚠ TensorFlow not available. ISL Keras model cannot be loaded.")
+        print("[WARNING] TensorFlow not available. ISL Keras model cannot be loaded.")
 
 # -----------------------------
 #   LABELS / ALPHABET
@@ -146,6 +160,40 @@ labels_dict = {
 
 # Alphabet for ISL Keras landmark model (digits 1-9 + letters A–Z)
 keras_alphabet = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] + list(string.ascii_uppercase)
+
+
+def verify_model_metadata_matches_alphabet():
+    """Load model metadata and compare class_names to keras_alphabet for quick sanity check."""
+    if not os.path.exists(MODEL_METADATA_PATH):
+        print(f"[WARNING] Metadata not found at {MODEL_METADATA_PATH}")
+        return
+
+    try:
+        with open(MODEL_METADATA_PATH, 'r', encoding='utf-8') as f:
+            metadata = json.load(f)
+        meta_classes = metadata.get('class_names', [])
+
+        if meta_classes == keras_alphabet:
+            print(f"[OK] Metadata classes match keras_alphabet ({len(meta_classes)} classes)")
+            return
+
+        # Length mismatch or ordering mismatch
+        if len(meta_classes) != len(keras_alphabet):
+            print(f"[WARNING] Metadata class count ({len(meta_classes)}) differs from keras_alphabet ({len(keras_alphabet)})")
+        else:
+            # Same length but maybe different order/content
+            diff_meta = [c for c in meta_classes if c not in keras_alphabet]
+            diff_alphabet = [c for c in keras_alphabet if c not in meta_classes]
+            if diff_meta or diff_alphabet:
+                print(f"[WARNING] Metadata/keras_alphabet mismatch. Extra in metadata: {diff_meta}. Missing in metadata: {diff_alphabet}")
+            else:
+                print("[WARNING] Metadata classes order differs from keras_alphabet")
+    except Exception as e:
+        print(f"[WARNING] Could not verify metadata vs keras_alphabet: {e}")
+
+
+# Run the verification once on startup
+verify_model_metadata_matches_alphabet()
 
 
 @app.route('/')
@@ -173,22 +221,33 @@ def handle_connect():
 # ----------------------------------------------------
 def open_camera():
     is_windows = platform.system().lower() == "windows"
-    backend = cv2.CAP_DSHOW if is_windows else cv2.CAP_ANY
+    
+    # Try to use CAP_DSHOW on Windows if available, otherwise use default
+    backend = None
+    if is_windows:
+        try:
+            backend = cv2.CAP_DSHOW
+        except AttributeError:
+            # CAP_DSHOW not available, use default backend
+            backend = None
+    
+    print("Trying to open camera at index 0 using backend:", backend if backend is not None else "default")
 
-    print("Trying to open camera at index 0 using backend:", backend)
-
-    cap = cv2.VideoCapture(0, backend)
+    if backend is not None:
+        cap = cv2.VideoCapture(0, backend)
+    else:
+        cap = cv2.VideoCapture(0)
 
     if cap.isOpened():
         ret, frame = cap.read()
         if ret and frame is not None:
-            print("✔ Camera opened successfully at index 0")
+            print("[OK] Camera opened successfully at index 0")
             return cap
         else:
-            print("⚠ Camera opened but no frames received.")
+            print("[WARNING] Camera opened but no frames received.")
             cap.release()
 
-    print("❌ ERROR: Could not access camera at index 0")
+    print("[ERROR] Could not access camera at index 0")
     return None
 
 
@@ -263,8 +322,9 @@ def predict_with_keras_landmark_model(pre_processed_landmark_list):
         return None, 0.0
 
     try:
-        df = pd.DataFrame(pre_processed_landmark_list).transpose()
-        predictions = keras_model.predict(df, verbose=0)
+        # Optimize: Use numpy array directly instead of creating DataFrame
+        input_array = np.array(pre_processed_landmark_list, dtype=np.float32).reshape(1, -1)
+        predictions = keras_model.predict(input_array, verbose=0)
         predicted_class = int(np.argmax(predictions, axis=1)[0])
         confidence = float(np.max(predictions))
 
@@ -282,7 +342,7 @@ def predict_with_keras_landmark_model(pre_processed_landmark_list):
 def get_combined_prediction(skeleton_pred, skeleton_conf, keras_pred, keras_conf):
     """
     Combine predictions from both ISL models.
-    Uses the prediction with higher confidence, or ensemble if both are similar.
+    Prioritizes Keras model (trained on Indian Sign Language dataset) when available.
     """
     # If only one model has prediction, use that
     if skeleton_pred is None and keras_pred is not None:
@@ -292,16 +352,16 @@ def get_combined_prediction(skeleton_pred, skeleton_conf, keras_pred, keras_conf
     if skeleton_pred is None and keras_pred is None:
         return None, 0.0, None
     
-    # Both models have predictions - use the one with higher confidence
-    # Give slight preference to skeleton model as it's more reliable for hand gestures
-    skeleton_weight = 1.1  # 10% boost for skeleton model
+    # Both models have predictions - PRIORITIZE KERAS (it's trained on your dataset)
+    # Keras model is more reliable for Indian Sign Language
+    keras_weight = 1.2  # 20% boost for keras model (prioritize it)
     
-    weighted_skeleton_conf = skeleton_conf * skeleton_weight
+    weighted_keras_conf = keras_conf * keras_weight
     
-    if weighted_skeleton_conf >= keras_conf:
-        return skeleton_pred, skeleton_conf, "ISL-Skeleton"
-    else:
+    if weighted_keras_conf >= skeleton_conf:
         return keras_pred, keras_conf, "ISL-Keras"
+    else:
+        return skeleton_pred, skeleton_conf, "ISL-Skeleton"
 
 
 # ----------------------------------------------------
@@ -341,6 +401,9 @@ def generate_frames():
     )
 
     frame_count = 0
+    prediction_skip_frames = 3  # Process prediction every 3rd frame (reduce TensorFlow overhead)
+    last_prediction = None
+    last_confidence = 0.0
 
     # ----------------------------------------------------
     #   FRAME LOOP
@@ -350,7 +413,7 @@ def generate_frames():
             ret, frame = cap.read()
 
             if not ret or frame is None:
-                print("⚠ Warning: Could not read frame.")
+                print("[WARNING] Could not read frame.")
                 continue
 
             frame = cv2.flip(frame, 1)
@@ -362,10 +425,13 @@ def generate_frames():
             # Track all predictions for this frame
             all_predictions = []
             
+            # OPTIMIZATION: Only run predictions every N frames to reduce TensorFlow overhead
+            should_predict = (frame_count % prediction_skip_frames == 0)
+            
             if results.multi_hand_landmarks:
                 num_hands_detected = len(results.multi_hand_landmarks)
-                if num_hands_detected > 1:
-                    print(f"✓ Detected {num_hands_detected} hands in frame")
+                if num_hands_detected > 1 and frame_count % 50 == 0:  # Log less frequently
+                    print(f"[OK] Detected {num_hands_detected} hands in frame")
                 
                 # Get hand labels (Left/Right) if available
                 hand_labels = []
@@ -456,18 +522,21 @@ def generate_frames():
 
                 # -------------------------------------
                 #  GET PREDICTIONS FROM BOTH MODELS (using combined features)
+                # Run on prediction frames for balance between speed and accuracy
                 # -------------------------------------
-                if combined_skeleton_features and combined_keras_features:
+                if should_predict and combined_skeleton_features and combined_keras_features:
                     skeleton_pred, skeleton_conf = predict_with_skeleton_model(combined_skeleton_features)
                     keras_pred, keras_conf = predict_with_keras_landmark_model(combined_keras_features)
 
-                    # Combine predictions (ensemble)
+                    # Combine predictions (ensemble with preference for Keras model)
                     predicted_character, confidence, model_used = get_combined_prediction(
                         skeleton_pred, skeleton_conf, keras_pred, keras_conf
                     )
 
                     # Store prediction (combined for all hands)
                     if predicted_character is not None:
+                        last_prediction = predicted_character
+                        last_confidence = confidence
                         all_predictions.append({
                             'character': predicted_character,
                             'confidence': confidence,
@@ -475,10 +544,47 @@ def generate_frames():
                             'hand_label': 'Combined' if num_hands_detected > 1 else hand_labels[0] if hand_labels else 'Hand',
                             'bbox': hand_bboxes[0] if hand_bboxes else (0, 0, 0, 0)
                         })
-                        if num_hands_detected > 1:
+                        if num_hands_detected > 1 and frame_count % 30 == 0:  # Log less frequently
                             print(f"  Combined prediction from {num_hands_detected} hands: {predicted_character} (conf: {confidence:.2f})")
+                elif last_prediction is not None:
+                    # Between prediction frames, use the last prediction
+                    all_predictions.append({
+                        'character': last_prediction,
+                        'confidence': last_confidence,
+                        'model': 'ISL-Skeleton',
+                        'hand_label': 'Combined' if num_hands_detected > 1 else hand_labels[0] if hand_labels else 'Hand',
+                        'bbox': hand_bboxes[0] if hand_bboxes else (0, 0, 0, 0)
+                    })
                     
                     # Draw bounding boxes and predictions for each hand
+                    for hand_idx, (x1, y1, x2, y2) in enumerate(hand_bboxes):
+                        # Use different colors for left/right hands
+                        if hand_idx == 0:
+                            color = (0, 255, 0) if last_confidence > 0.7 else (0, 165, 255) if last_confidence > 0.5 else (0, 0, 255)
+                        else:
+                            color = (255, 0, 0) if last_confidence > 0.7 else (255, 165, 0) if last_confidence > 0.5 else (255, 0, 255)
+                        
+                        cv2.rectangle(frame, (x1, y1), (x2, y2), color, 3)
+                        
+                        # Label with hand identifier if multiple hands
+                        if last_prediction is not None:
+                            label_text = f"{last_prediction} ({last_confidence*100:.1f}%)"
+                            if num_hands_detected > 1:
+                                hand_label = hand_labels[hand_idx] if hand_idx < len(hand_labels) else f'Hand {hand_idx + 1}'
+                                label_text = f"[{hand_label}] {label_text}"
+                            
+                            cv2.putText(
+                                frame,
+                                label_text,
+                                (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_SIMPLEX,
+                                0.7,
+                                color,
+                                2
+                            )
+                    
+                # Draw bounding boxes and predictions for prediction frames
+                if should_predict and all_predictions:
                     for hand_idx, (x1, y1, x2, y2) in enumerate(hand_bboxes):
                         # Use different colors for left/right hands
                         if hand_idx == 0:
@@ -530,8 +636,8 @@ def generate_frames():
                    frame_bytes + b'\r\n')
 
             frame_count += 1
-            if frame_count % 100 == 0:
-                print(f"Processed {frame_count} frames")
+            if frame_count % 300 == 0:  # Log less frequently (every 300 frames instead of 100)
+                print(f"Processed {frame_count} frames (FPS optimized with frame skipping)")
 
         except Exception as e:
             print("Error in generate_frames:", e)
@@ -554,9 +660,9 @@ if __name__ == '__main__':
     print("\n" + "="*50)
     print("   SignSpeak - Sign Language Detection")
     print("="*50)
-    print(f"ISL Skeleton Model: {'✔ Loaded' if skeleton_model else '❌ Not Available'}")
-    print(f"ISL Keras Landmark Model: {'✔ Loaded' if keras_model else '❌ Not Available'}")
-    print(f"TensorFlow/Keras: {'✔ Available' if TENSORFLOW_AVAILABLE else '❌ Not Installed'}")
+    print(f"ISL Skeleton Model: {'[OK] Loaded' if skeleton_model else '[ERROR] Not Available'}")
+    print(f"ISL Keras Landmark Model: {'[OK] Loaded' if keras_model else '[ERROR] Not Available'}")
+    print(f"TensorFlow/Keras: {'[OK] Available' if TENSORFLOW_AVAILABLE else '[ERROR] Not Installed'}")
     print("="*50 + "\n")
     
     socketio.run(app, host='0.0.0.0', port=5000, debug=True, allow_unsafe_werkzeug=True)

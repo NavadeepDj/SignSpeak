@@ -48,6 +48,9 @@ model/
 *.pt
 *.pth
 
+# Keep small metadata/config files under model/
+!model/model_metadata.json
+
 # Checkpoints
 checkpoints/
 *.ckpt
