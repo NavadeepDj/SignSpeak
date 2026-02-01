@@ -25,7 +25,7 @@ This document describes the **Indian Sign Language (ISL)** recognition project i
 
 - Captures live video from a webcam.
 - Detects hand(s) and extracts **hand landmarks** using **MediaPipe**.
-- Classifies gestures using **two ML models** (Keras neural network + scikit-learn RandomForest).
+- Classifies gestures using the **ISL Keras model** only (trained on Indian Sign Language).
 - Streams the video and sends **predictions** to a web UI via **Flask** and **WebSocket**.
 - Displays recognized characters in a text area and supports **text-to-speech** (Speak All).
 
@@ -35,14 +35,14 @@ This document describes the **Indian Sign Language (ISL)** recognition project i
 
 ## 2. Models
 
-The system uses **two** complementary models that share the same **84-dimensional** feature vector (see [Feature extraction](#feature-extraction)).
+**Prediction uses only the ISL Keras landmark model** (trained on Indian Sign Language). The same **84-dimensional** feature vector is used (see [Feature extraction](#feature-extraction)).
 
-### 2.1 ISL Keras Landmark Model
+### 2.1 ISL Keras Landmark Model (used for prediction)
 
 | Property | Value |
 |----------|--------|
 | **Type** | Dense neural network (Keras/TensorFlow) |
-| **File** | `model/indian_sign_model.h5`(`checkpoints/best_model_*.h5`) |
+| **File** | `model/indian_sign_model.h5` or `checkpoints/best_model_*.h5` |
 | **Input** | 84 features (normalized landmark vector) |
 | **Output** | 35 classes (softmax probabilities) |
 | **Labels** | `['1','2',…,'9','A','B',…,'Z']` |
@@ -65,45 +65,24 @@ Input(84)
 
 - **Parameters:** ~67K trainable.
 - **Inference:** ~2–5 ms per prediction on CPU (see `profile_models.py`).
-- **Role:** Primary model; preferred when confidence is comparable (see [Combining predictions](#combining-predictions)).
+- **Role:** Only model used for live prediction (Indian Sign Language).
 
-### 2.2 ISL Skeleton Model (RandomForest)
+### 2.2 ISL Skeleton Model (RandomForest) — not used for prediction
 
-| Property | Value |
-|----------|--------|
-| **Type** | scikit-learn `RandomForestClassifier` |
-| **File** | `model/model.p` (pickle) |
-| **Input** | 84 features (same format as Keras, but skeleton-style normalization) |
-| **Output** | Class index; `predict_proba` for confidence |
-| **Labels** | Same 35 classes (stored in pickle metadata) |
+The skeleton model (`model/model.p`) may still be loaded for compatibility but **is not used for prediction**. All live output comes from the Keras model.
 
-- **Training:** 400 trees, same 84-D input (skeleton-style features from training script).
-- **Inference:** ~1–2 ms per prediction; faster than Keras.
-- **Role:** Fallback and ensemble partner; used when Keras is unavailable or when its confidence is lower.
+### 2.3 Feature Extraction (84-D Vector)
 
-### 2.3 Feature Extraction (Shared 84-D Vector)
-
-Both models expect a **single 84-dimensional** vector per frame:
+The Keras model expects a **single 84-dimensional** vector per frame:
 
 - **One hand:** 42 values (21 landmarks × 2 coordinates) for that hand + **42 zeros** (padding).
 - **Two hands:** 42 values for hand 1 + 42 values for hand 2.
 
-**Skeleton model (RandomForest) features:**
+**Keras landmark features (used for prediction):**
 
-- MediaPipe landmarks in normalized image coordinates.
-- For each hand: subtract min-x and min-y (bounding box), then append `(x - min_x, y - min_y)` for all 21 points → 42 values per hand.
-- **Left hand:** x is mirrored so it is treated like a right hand (`mirrored_x = max_x - (x - min_x)`), then relative to min.
-
-**Keras landmark model features:**
-
-- Same 21 landmarks per hand converted to **pixel** coordinates via `calc_landmark_list()`.
+- 21 landmarks per hand converted to **pixel** coordinates via `calc_landmark_list()`.
 - **Pre-processing:** relative to landmark 0 (wrist), flattened to 42 values, then normalized by max absolute value (`pre_process_landmark()`).
-- Combined for two hands (or padded with zeros for one hand) → 84 values.
-
-So:
-
-- **Skeleton model:** bbox-normalized, chirality-corrected (left hand mirrored).
-- **Keras model:** wrist-relative, normalized by scale; same 84-D layout (42 + 42 or 42 + 0-pad).
+- Combined for two hands (or padded with zeros for one hand) → 84 values (wrist-relative, normalized by scale).
 
 ---
 
@@ -134,7 +113,7 @@ High-level layout:
 │  │    → Temporal smoothing → socketio.emit('prediction')             │  │
 │  │    → Encode frame → yield MJPEG                                    │  │
 │  └───────────────────────────────────────────────────────────────────┘  │
-│  Models: model.p (pickle) + indian_sign_model.h5 (Keras)                 │
+│  Model: indian_sign_model.h5 (Keras only, for prediction)                │
 └─────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -145,7 +124,7 @@ High-level layout:
 | **Frontend** | HTML, JS, Bootstrap, Socket.IO client | Page UI, video display, receive predictions, show text, TTS (Speak All / Pause / Clear). |
 | **Backend** | Flask, Flask-SocketIO | Serve `/`, `/video_feed`, `/api/status`; WebSocket server for `prediction` events. |
 | **Vision** | OpenCV, MediaPipe | Camera capture, frame resize (e.g. 640×480), hand detection, 21 landmarks per hand. |
-| **ML** | scikit-learn, TensorFlow/Keras | Load `model.p` and `.h5`; run inference on 84-D vectors; combine and smooth predictions. |
+| **ML** | TensorFlow/Keras | Load `.h5`; run inference on 84-D vectors; temporal smoothing of predictions. |
 
 ---
 
@@ -157,33 +136,19 @@ High-level layout:
 2. **Detect hands:** `MediaPipe Hands` on RGB frame → `multi_hand_landmarks` (up to 2 hands).
 3. **Per hand:**  
    - Draw landmarks.  
-   - Build **skeleton** 42-D (bbox-normalized, with left-hand mirroring).  
    - Build **Keras** 42-D (pixel landmarks → relative to wrist → normalized).
-4. **Combine hands:** 42 + 42 or 42 + zero-padding → **84-D** for skeleton and 84-D for Keras.
-5. **Predict:**  
-   - Skeleton: `skeleton_model.predict` / `predict_proba`.  
-   - Keras: `keras_model.predict` on 84-D.
-6. **Combine predictions:** `get_combined_prediction()` (Keras preferred when confidences are close; 1.2× weight on Keras).
-7. **Temporal smoothing:**  
+4. **Combine hands:** 42 + 42 or 42 + zero-padding → **84-D** for Keras.
+5. **Predict:** `keras_model.predict` on 84-D (Keras model only).
+6. **Temporal smoothing:**  
    - Only consider predictions with confidence ≥ 0.75.  
    - Keep last 5 predictions; require 60% consistency (e.g. 3/5 same).  
    - Emit via `socketio.emit('prediction', {...})` only when stable and different from last emitted.
-8. **Special rule:** If the stable gesture is **’C’** (left-hand open palm), emit **space** for the text area.
-9. **Encode:** Frame → JPEG → MJPEG chunk; yield to `/video_feed`.
+7. **Special rule:** If the stable gesture is **’C’** (left-hand open palm), emit **space** for the text area.
+8. **Encode:** Frame → JPEG → MJPEG chunk; yield to `/video_feed`.
 
 Prediction is run only every **N-th frame** (e.g. every 3rd) to reduce CPU/TensorFlow load while keeping smooth video.
 
-### 4.2 Combining Predictions
-
-- If only one model returns a result → use that.
-- If both return:
-  - `weighted_keras_conf = keras_conf * 1.2`
-  - If `weighted_keras_conf >= skeleton_conf` → use **Keras** label and confidence.
-  - Else → use **Skeleton** label and confidence.
-
-So the **Keras** model is intentionally favored when confidences are similar.
-
-### 4.3 Output to the User
+### 4.2 Output to the User
 
 - **Video:** Continuous MJPEG stream at `/video_feed` (mirrored, with landmarks and bounding boxes).
 - **Text:** Characters (or space) sent over WebSocket as `prediction` events; the frontend appends them to the “Recognized text” area.
@@ -203,9 +168,8 @@ So the **Keras** model is intentionally favored when confidences are similar.
    ```
    (Or use `requirements_venv.txt` if that matches your environment.)
 
-2. **Models:**  
-   - Place `model.p` in `./model/`.  
-   - Place the Keras model as `./model/indian_sign_model.h5` (or one of the paths in `KERAS_MODEL_PATHS` in `app.py`).
+2. **Model:**  
+   - Place the Keras model as `./model/indian_sign_model.h5` (or one of the paths in `KERAS_MODEL_PATHS` in `app.py`). Prediction uses only this model.
 
 3. **Start server:**
    ```bash
@@ -233,7 +197,7 @@ So the **Keras** model is intentionally favored when confidences are similar.
   - Event `prediction` with payload, e.g.:
     - `text`: character (or space).
     - `confidence`: 0–1.
-    - `model`: `"ISL-Keras"` or `"ISL-Skeleton"`.
+    - `model`: `"ISL-Keras"` (only model used).
     - `num_hands`, `stability`, `gesture` (internal gesture label).
 
 You can build your own client that listens to `prediction` and uses `text` (and optionally `confidence`) as the main output.
@@ -375,8 +339,8 @@ sign-to-text-and-speech/
 
 ## Summary
 
-- **Models:** One Keras Dense (84→256→128→64→35) and one RandomForest, both on 84-D hand-landmark features (skeleton-style and preprocessed-style respectively), with two-hand support via padding/concatenation.
-- **Architecture:** Flask + SocketIO server runs a single frame generator that does camera → MediaPipe → features → both models → combined prediction → temporal smoothing → WebSocket + MJPEG.
+- **Model:** Only the Keras Dense model (84→256→128→64→35) is used for prediction, on 84-D hand-landmark features (preprocessed, two-hand support via padding/concatenation).
+- **Architecture:** Flask + SocketIO server runs a single frame generator that does camera → MediaPipe → features → Keras model → temporal smoothing → WebSocket + MJPEG.
 - **Output:** Real-time characters (and space) in the web UI and via WebSocket `prediction` events; optional TTS with “Speak All”.
 - **Training:** `train_indian_model.py` builds both the Keras and skeleton models from an `Indian/` image dataset using MediaPipe-derived 84-D features and saves them plus metadata for use by `app.py`.
 
