@@ -343,6 +343,8 @@
             color: var(--text-dark);
             border: 1px solid var(--border-color);
             overflow-y: auto;
+            white-space: pre-wrap;
+            word-wrap: break-word;
         }
 
         .recognized-paragraph.empty {
@@ -703,8 +705,8 @@
             currentConfidence = confidence;
             updateConfidenceMeter(confidence);
 
-            // Add recognized text
-            if (text && text.trim()) {
+            // Add recognized text (allow spaces explicitly)
+            if (text !== undefined && text !== null && text !== '') {
                 addRecognizedText(text, confidence, isWord);
             }
         });
@@ -730,6 +732,14 @@
             // Remove empty state class
             paragraphElement.classList.remove('empty');
             
+            // Handle space character (from left hand open palm gesture)
+            if (text === ' ') {
+                paragraphText += ' ';
+                paragraphElement.textContent = paragraphText;
+                paragraphElement.scrollTop = paragraphElement.scrollHeight;
+                return;
+            }
+            
             // Get the last word in the paragraph
             const words = paragraphText.trim().split(/\s+/);
             const lastWord = words.length > 0 ? words[words.length - 1] : '';
@@ -742,21 +752,13 @@
             // Check if text ends with punctuation
             const endsWithPunctuation = /[.!?,;:]$/.test(text);
             
-            // Add space if paragraph already has text
-            if (paragraphText.trim() && !text.match(/^[.!?,;:]/)) {
-                if (!paragraphText.trim().match(/[.!?,;:]$/)) {
-                    paragraphText += ' ';
-                }
+            // Add space if paragraph already has text and doesn't end with space
+            if (paragraphText.length > 0 && !paragraphText.endsWith(' ')) {
+                paragraphText += ' ';
             }
             
             // Add the complete word
             paragraphText += text;
-            
-            // Add period if it's a complete phrase
-            const completePhrases = ['Hello', 'Thank You', 'Done', 'Sorry', 'Please', 'You are welcome.'];
-            if (completePhrases.includes(text) && !endsWithPunctuation) {
-                paragraphText += '.';
-            }
             
             // Update the paragraph display
             paragraphElement.textContent = paragraphText;

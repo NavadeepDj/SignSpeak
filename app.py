@@ -163,6 +163,12 @@ labels_dict = {
 # Alphabet for ISL Keras landmark model (digits 1-9 + letters A–Z)
 keras_alphabet = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] + list(string.ascii_uppercase)
 
+# Special gesture mappings:
+# - 'C' (detected from left hand open palm) → SPACE (for word separation)
+# - Right hand open palm → '5' (normal digit)
+# Note: Left vs right hand produces different landmark patterns, 
+#       creating this natural distinction for special functions
+
 
 def verify_model_metadata_matches_alphabet():
     """Load model metadata and compare class_names to keras_alphabet for quick sanity check."""
@@ -700,20 +706,25 @@ def generate_frames():
                         if consistency_ratio >= CONSISTENCY_THRESHOLD:
                             # Only emit if it's different from last emitted (avoid spam)
                             if most_common_pred != last_emitted_prediction:
+                                # Convert 'C' (left hand open palm) to SPACE for word separation
+                                display_char = '   ' if most_common_pred == 'C' else most_common_pred
+                                
                                 hands_count = len(results.multi_hand_landmarks) if results.multi_hand_landmarks else 0
                                 try:
                                     socketio.emit(
                                         'prediction',
                                         {
-                                            'text': most_common_pred, 
+                                            'text': display_char, 
                                             'confidence': float(pred_confidence),
                                             'model': single_prediction['model'],
                                             'num_hands': hands_count,
-                                            'stability': f'{consistency_ratio*100:.0f}%'
+                                            'stability': f'{consistency_ratio*100:.0f}%',
+                                            'gesture': most_common_pred  # Keep original for debugging
                                         }
                                     )
                                     last_emitted_prediction = most_common_pred
-                                    print(f"[STABLE] Emitted: {most_common_pred} (stability: {consistency_ratio*100:.0f}%)")
+                                    gesture_label = 'SPACE' if most_common_pred == 'C' else most_common_pred
+                                    print(f"[STABLE] Emitted: {gesture_label} (stability: {consistency_ratio*100:.0f}%)")
                                 except Exception as ws_error:
                                     print(f"[WARNING] WebSocket emit error: {ws_error}")
                 else:
@@ -721,10 +732,12 @@ def generate_frames():
                     if len(prediction_history) > 0:
                         print(f"[TRANSITION] Low confidence ({pred_confidence:.2f}), clearing history")
                         prediction_history.clear()
+                        last_emitted_prediction = None  # Reset so same gesture can be detected next time
             else:
                 # No hands detected - clear history
                 if len(prediction_history) > 0:
                     prediction_history.clear()
+                    last_emitted_prediction = None  # Reset so same gesture can be detected next time
             
             # Visual feedback for stability
             if len(prediction_history) > 0:
