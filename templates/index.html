@@ -388,6 +388,67 @@
             margin-top: 0.5rem;
         }
 
+        /* Word Suggestions */
+        .word-suggestions {
+            margin-top: 1rem;
+            padding: 1rem;
+            background: var(--bg-light);
+            border-radius: 12px;
+            min-height: 60px;
+        }
+
+        .suggestions-label {
+            font-size: 0.875rem;
+            font-weight: 600;
+            color: var(--text-light);
+            margin-bottom: 0.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .suggestions-chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 0.5rem;
+        }
+
+        .suggestion-chip {
+            background: white;
+            border: 2px solid var(--border-color);
+            color: var(--text-dark);
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .suggestion-chip:hover {
+            background: var(--primary-color);
+            color: white;
+            border-color: var(--primary-color);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(37, 99, 235, 0.2);
+        }
+
+        .suggestion-chip.empty {
+            cursor: default;
+            color: var(--text-light);
+            font-style: italic;
+        }
+
+        .suggestion-chip.empty:hover {
+            background: white;
+            color: var(--text-light);
+            border-color: var(--border-color);
+            transform: none;
+            box-shadow: none;
+        }
+
         /* Action Buttons */
         .action-buttons {
             display: flex;
@@ -605,6 +666,17 @@
                 </div>
             </div>
 
+            <!-- Word Suggestions -->
+            <div class="word-suggestions">
+                <div class="suggestions-label">
+                    <i class="fas fa-lightbulb"></i>
+                    <span>Word Suggestions</span>
+                </div>
+                <div class="suggestions-chips" id="suggestionsContainer">
+                    <div class="suggestion-chip empty">Start signing to see suggestions...</div>
+                </div>
+            </div>
+
             <div class="action-buttons">
                 <button class="btn-speak-all" id="speakAllButton">
                     <i class="fas fa-volume-up"></i>
@@ -631,6 +703,16 @@
         let recognizedTexts = [];
         let currentConfidence = 85;
         let paragraphText = '';
+        let wordDictionary = [];
+
+        // Load word dictionary
+        fetch('/static/dictionary.json')
+            .then(response => response.json())
+            .then(data => {
+                wordDictionary = data.words;
+                console.log(`Loaded ${wordDictionary.length} words for suggestions`);
+            })
+            .catch(error => console.error('Error loading dictionary:', error));
 
         // Update timestamp
         function updateTimestamp() {
@@ -765,6 +847,66 @@
             
             // Auto-scroll to bottom
             paragraphElement.scrollTop = paragraphElement.scrollHeight;
+            
+            // Update word suggestions
+            updateWordSuggestions();
+        }
+
+        // Update word suggestions based on current text
+        function updateWordSuggestions() {
+            const suggestionsContainer = document.getElementById('suggestionsContainer');
+            
+            // Get the last word being typed (incomplete word)
+            const words = paragraphText.trim().split(/\s+/);
+            const lastWord = words[words.length - 1] || '';
+            
+            // Only show suggestions if there's at least one character
+            if (lastWord.length === 0) {
+                suggestionsContainer.innerHTML = '<div class="suggestion-chip empty">Start signing to see suggestions...</div>';
+                return;
+            }
+            
+            // Find matching words (case-insensitive prefix match)
+            const matches = wordDictionary
+                .filter(word => word.toUpperCase().startsWith(lastWord.toUpperCase()))
+                .slice(0, 5); // Top 5 suggestions
+            
+            if (matches.length === 0) {
+                suggestionsContainer.innerHTML = '<div class="suggestion-chip empty">No suggestions available</div>';
+                return;
+            }
+            
+            // Display suggestions
+            suggestionsContainer.innerHTML = '';
+            matches.forEach(word => {
+                const chip = document.createElement('div');
+                chip.className = 'suggestion-chip';
+                chip.innerHTML = `<i class="fas fa-hand-pointer"></i><span>${word}</span>`;
+                chip.onclick = () => acceptSuggestion(word);
+                suggestionsContainer.appendChild(chip);
+            });
+        }
+
+        // Accept a word suggestion
+        function acceptSuggestion(word) {
+            // Replace the last incomplete word with the suggestion
+            const words = paragraphText.trim().split(/\s+/);
+            
+            if (words.length > 0) {
+                words[words.length - 1] = word;
+                paragraphText = words.join(' ') + ' '; // Add space after accepted word
+            } else {
+                paragraphText = word + ' ';
+            }
+            
+            // Update display
+            const paragraphElement = document.getElementById('recognizedParagraph');
+            paragraphElement.textContent = paragraphText;
+            paragraphElement.classList.remove('empty');
+            
+            // Clear suggestions after accepting
+            document.getElementById('suggestionsContainer').innerHTML = 
+                '<div class="suggestion-chip empty">Continue signing...</div>';
         }
 
         // Clear paragraph text
