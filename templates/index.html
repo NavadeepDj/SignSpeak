@@ -831,15 +831,8 @@
             //     return;
             // }
             
-            // Check if text ends with punctuation
-            const endsWithPunctuation = /[.!?,;:]$/.test(text);
-            
-            // Add space if paragraph already has text and doesn't end with space
-            if (paragraphText.length > 0 && !paragraphText.endsWith(' ')) {
-                paragraphText += ' ';
-            }
-            
-            // Add the complete word
+            // Add the text directly without automatic spacing
+            // Spaces will only appear when the user makes the space sign gesture
             paragraphText += text;
             
             // Update the paragraph display
@@ -936,10 +929,9 @@
             }
         }
 
-        // Helper: speak text word‑by‑word instead of one long utterance
-        function speakTextByWords(text) {
-            const words = text.split(/\s+/).filter(w => w.length > 0);
-            if (words.length === 0) return;
+        // Helper: speak text as complete words (not letter by letter)
+        function speakText(text) {
+            if (!text || text.trim().length === 0) return;
 
             speechSynthesis.cancel();
 
@@ -950,33 +942,21 @@
                 (voice.name.includes('Female') || voice.name.includes('US'))
             ) || voices.find(voice => voice.lang.startsWith('en')) || voices[0];
 
-            let index = 0;
+            // Speak the entire text as one utterance - speech synthesis will naturally
+            // pronounce words properly (e.g., "HELLO" as "hello", not "H-E-L-L-O")
+            const utterance = new SpeechSynthesisUtterance(text.trim());
+            utterance.rate = rate;
+            utterance.pitch = 1.0;
+            utterance.volume = 1.0;
 
-            const speakNext = () => {
-                if (index >= words.length) return;
+            if (preferredVoice) {
+                utterance.voice = preferredVoice;
+            }
 
-                const utterance = new SpeechSynthesisUtterance(words[index]);
-                utterance.rate = rate;
-                utterance.pitch = 1.0;
-                utterance.volume = 1.0;
-
-                if (preferredVoice) {
-                    utterance.voice = preferredVoice;
-                }
-
-                utterance.onend = () => {
-                    index += 1;
-                    // Small pause between words
-                    setTimeout(speakNext, 120);
-                };
-
-                speechSynthesis.speak(utterance);
-            };
-
-            speakNext();
+            speechSynthesis.speak(utterance);
         }
 
-        // Speak All button (word‑by‑word)
+        // Speak All button - speaks words naturally
         document.getElementById('speakAllButton').addEventListener('click', function() {
             const allText = paragraphText.trim();
             
@@ -985,7 +965,7 @@
                 return;
             }
             
-            speakTextByWords(allText);
+            speakText(allText);
         });
 
         // Pause button
