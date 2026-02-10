@@ -966,14 +966,17 @@
             speakText(allText);
         });
 
-        // Pause button
+        // Pause / Resume toggle button (updates icon correctly)
         document.getElementById('pauseButton').addEventListener('click', function() {
-            if (speechSynthesis.speaking) {
-                speechSynthesis.pause();
-                this.innerHTML = '<i class="fas fa-play"></i>';
-            } else if (speechSynthesis.paused) {
+            // If speech is currently paused, resume and show pause icon
+            if (speechSynthesis.paused) {
                 speechSynthesis.resume();
                 this.innerHTML = '<i class="fas fa-pause"></i>';
+            }
+            // If speech is currently speaking (and not paused), pause and show play icon
+            else if (speechSynthesis.speaking) {
+                speechSynthesis.pause();
+                this.innerHTML = '<i class="fas fa-play"></i>';
             }
         });
 
