@@ -380,6 +380,8 @@ To run the project on a **different Windows computer** (e.g. copy folder to USB 
 
 See **[RUN-ON-ANOTHER-PC.md](RUN-ON-ANOTHER-PC.md)** for step-by-step instructions and what to copy.
 
+**Docker + Camera on Windows?** See **[DOCKER-CAMERA-SETUP-GUIDE.md](DOCKER-CAMERA-SETUP-GUIDE.md)** for USB passthrough setup using usbipd-win.
+
 ### Command Line Options
 
 Currently, the application runs with default settings. Future versions may include:

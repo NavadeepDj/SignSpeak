@@ -23,6 +23,9 @@ Use this guide to run the project on a **different computer** with minimal setup
 
 **Bottom line: If you need the camera to work, use Option B (Python).**
 
+**Advanced: Docker + Camera on Windows IS possible** using USB passthrough (usbipd-win).
+See **[DOCKER-CAMERA-SETUP-GUIDE.md](DOCKER-CAMERA-SETUP-GUIDE.md)** for the complete setup guide.
+
 ---
 
 ## What You Need to Copy

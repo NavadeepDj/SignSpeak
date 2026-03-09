@@ -164,10 +164,43 @@ labels_dict = {
 keras_alphabet = ['1', '2', '3', '4', '5', '6', '7', '8', '9'] + list(string.ascii_uppercase)
 
 # Special gesture mappings:
-# - 'C' (detected from left hand open palm) → SPACE (for word separation)
-# - Right hand open palm → '5' (normal digit)
-# Note: Left vs right hand produces different landmark patterns, 
-#       creating this natural distinction for special functions
+# - Pinch gesture (thumb tip touches index fingertip) → SPACE (for word separation)
+#   Detected geometrically from raw landmarks BEFORE model prediction,
+#   so it doesn't interfere with any of the 35 trained classes.
+
+# MediaPipe hand landmark indices
+# 0=wrist, 4=thumb_tip, 8=index_tip, 9=index_mcp (base of middle finger)
+PINCH_THRESHOLD = 0.08  # Normalized distance threshold for pinch detection
+PINCH_COOLDOWN_FRAMES = 0  # No cooldown - test if pinch detection works reliably
+
+
+def detect_pinch(hand_landmarks):
+    """Detect pinch gesture (thumb tip touching index fingertip) from raw MediaPipe landmarks.
+    
+    Returns True if pinch is detected. Uses normalized coordinates so it's
+    independent of hand distance from camera.
+    """
+    lm = hand_landmarks.landmark
+    
+    # Get thumb tip (4) and index finger tip (8)
+    thumb_tip = lm[4]
+    index_tip = lm[8]
+    
+    # Get wrist (0) and middle finger MCP (9) for hand-size normalization
+    wrist = lm[0]
+    middle_mcp = lm[9]
+    
+    # Hand size = distance from wrist to middle finger base
+    hand_size = ((wrist.x - middle_mcp.x) ** 2 + (wrist.y - middle_mcp.y) ** 2) ** 0.5
+    
+    if hand_size < 0.01:  # Hand too small / bad detection
+        return False
+    
+    # Distance between thumb tip and index tip, normalized by hand size
+    pinch_dist = ((thumb_tip.x - index_tip.x) ** 2 + (thumb_tip.y - index_tip.y) ** 2) ** 0.5
+    normalized_dist = pinch_dist / hand_size
+    
+    return normalized_dist < PINCH_THRESHOLD
 
 
 def verify_model_metadata_matches_alphabet():
@@ -468,6 +501,7 @@ def generate_frames():
     CONSISTENCY_THRESHOLD = 0.6  # 60% of frames must agree (3 out of 5)
     MIN_CONFIDENCE = 0.75  # Minimum confidence to consider a prediction
     last_emitted_prediction = None  # Last prediction sent to frontend
+    pinch_cooldown_counter = 0  # Cooldown timer for pinch-triggered spaces
 
     # ----------------------------------------------------
     #   FRAME LOOP
@@ -512,6 +546,59 @@ def generate_frames():
                 else:
                     # If hand labels not available, assign based on position
                     hand_labels = ['Hand'] * len(results.multi_hand_landmarks)
+
+                # --- PINCH GESTURE DETECTION (before model prediction) ---
+                # Check if any hand is doing a pinch → emit SPACE
+                pinch_detected = False
+                if pinch_cooldown_counter <= 0:
+                    for hand_landmarks in results.multi_hand_landmarks:
+                        if detect_pinch(hand_landmarks):
+                            pinch_detected = True
+                            break
+                
+                if pinch_detected:
+                    # Draw visual feedback for pinch
+                    for hand_landmarks in results.multi_hand_landmarks:
+                        mp_drawing.draw_landmarks(
+                            frame, hand_landmarks, mp_hands.HAND_CONNECTIONS,
+                            mp_drawing_styles.get_default_hand_landmarks_style(),
+                            mp_drawing_styles.get_default_hand_connections_style()
+                        )
+                    cv2.putText(frame, "PINCH -> SPACE", (10, 60),
+                               cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 255, 0), 2)
+                    
+                    # Emit space
+                    try:
+                        hands_count = len(results.multi_hand_landmarks)
+                        socketio.emit('prediction', {
+                            'text': ' ',
+                            'confidence': 1.0,
+                            'model': 'Pinch-Gesture',
+                            'num_hands': hands_count,
+                            'stability': '100%',
+                            'gesture': 'PINCH_SPACE'
+                        })
+                        print("[PINCH] Emitted: SPACE")
+                    except Exception as ws_error:
+                        print(f"[WARNING] WebSocket emit error: {ws_error}")
+                    
+                    pinch_cooldown_counter = PINCH_COOLDOWN_FRAMES
+                    # Clear prediction history so next letter starts fresh
+                    prediction_history.clear()
+                    last_emitted_prediction = None
+                    
+                    # Encode frame and yield (skip model prediction)
+                    ret_encode, buffer = cv2.imencode('.jpg', frame, [cv2.IMWRITE_JPEG_QUALITY, 85])
+                    if ret_encode and buffer is not None:
+                        yield (b'--frame\r\n'
+                               b'Content-Type: image/jpeg\r\n\r\n' +
+                               buffer.tobytes() + b'\r\n')
+                    frame_count += 1
+                    continue
+                
+                # Decrement pinch cooldown
+                if pinch_cooldown_counter > 0:
+                    pinch_cooldown_counter -= 1
 
                 # Collect features from ALL hands first (for two-hand model)
                 skeleton_features_list = []
@@ -738,8 +825,7 @@ def generate_frames():
                         if consistency_ratio >= CONSISTENCY_THRESHOLD:
                             # Only emit if it's different from last emitted (avoid spam)
                             if most_common_pred != last_emitted_prediction:
-                                # Convert 'C' (left hand open palm) to SPACE for word separation
-                                display_char = '   ' if most_common_pred == 'C' else most_common_pred
+                                display_char = most_common_pred
                                 
                                 hands_count = len(results.multi_hand_landmarks) if results.multi_hand_landmarks else 0
                                 try:
@@ -755,8 +841,7 @@ def generate_frames():
                                         }
                                     )
                                     last_emitted_prediction = most_common_pred
-                                    gesture_label = 'SPACE' if most_common_pred == 'C' else most_common_pred
-                                    print(f"[STABLE] Emitted: {gesture_label} (stability: {consistency_ratio*100:.0f}%)")
+                                    print(f"[STABLE] Emitted: {most_common_pred} (stability: {consistency_ratio*100:.0f}%)")
                                 except Exception as ws_error:
                                     print(f"[WARNING] WebSocket emit error: {ws_error}")
                 else:

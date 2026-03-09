@@ -175,10 +175,11 @@ The `group_add: video` adds the container user to the video group, fixing permis
    ```
    This avoids camera access issues entirely.
 
-4. **Option D: Use WSL2 with GUI** (advanced)
-   - Install WSL2 with GUI support
-   - Run Docker inside WSL2
-   - Access Windows camera from WSL2
+4. **Option D: Use USB Passthrough via usbipd** (advanced but works!)
+   - Forward USB webcam from Windows → WSL2 → Docker
+   - Requires: Ubuntu in WSL2, usbipd-win tool
+   - **See [DOCKER-CAMERA-SETUP-GUIDE.md](DOCKER-CAMERA-SETUP-GUIDE.md) for complete step-by-step instructions**
+   - This method works but requires setup each time you restart Windows
 
 ### macOS
 
@@ -332,9 +333,24 @@ docker rmi signspeak:latest
 docker system prune -a
 ```
 
+## Windows USB Camera Passthrough (Advanced)
+
+For a complete guide on setting up webcam access in Docker on Windows using USB passthrough (usbipd-win), see:
+
+**[DOCKER-CAMERA-SETUP-GUIDE.md](DOCKER-CAMERA-SETUP-GUIDE.md)**
+
+This guide covers:
+- Installing Ubuntu in WSL2
+- Setting up usbipd-win for USB forwarding
+- Attaching your webcam to WSL
+- Running Docker with camera access
+- All problems encountered and their solutions
+
+---
+
 ## Additional Notes
 
-- The Dockerfile uses Python 3.10 slim for smaller image size
+- The Dockerfile uses Python 3.11 slim for smaller image size
 - System dependencies are installed for OpenCV and MediaPipe
 - Health check is configured to monitor container status
 - Models are mounted as read-only for security

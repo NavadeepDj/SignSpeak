@@ -814,11 +814,14 @@
             // Remove empty state class
             paragraphElement.classList.remove('empty');
             
-            // Handle space character (from left hand open palm gesture)
+            // Handle space character (from pinch gesture)
+            // Only add space if the last character isn't already a space
             if (text === ' ') {
-                paragraphText += ' ';
-                paragraphElement.textContent = paragraphText;
-                paragraphElement.scrollTop = paragraphElement.scrollHeight;
+                if (!paragraphText.endsWith(' ')) {
+                    paragraphText += ' ';
+                    paragraphElement.textContent = paragraphText;
+                    paragraphElement.scrollTop = paragraphElement.scrollHeight;
+                }
                 return;
             }
             
