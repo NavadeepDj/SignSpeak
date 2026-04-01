@@ -57,6 +57,57 @@ The system recognizes **35 Indian Sign Language classes** covering digits (1-9) 
 - Robust error handling and camera reconnection
 - Cross-platform compatibility (Windows, Linux, macOS)
 
+## 🔍 How this project works
+
+At a high level, **SignSpeak** turns your hand gestures into text and speech in six stages:
+
+1. **Camera capture**
+   - Your browser loads the `/app` page and displays an MJPEG video stream from `/video_feed`.
+   - The backend (`app.py`) opens your webcam using OpenCV with Windows-friendly backends (DirectShow/MSMF) and continuously grabs frames.
+
+2. **Hand detection with MediaPipe**
+   - Each frame is passed through **MediaPipe Hands** (up to 2 hands).
+   - For every detected hand, the model returns 21 landmarks (x, y positions of key joints).
+   - Landmarks are drawn on the frame for visual feedback.
+
+3. **Feature extraction (84 features)**
+   - Landmarks are normalized relative to each hand’s bounding box.
+   - For each hand, the 21 points are flattened into a **42‑element vector** (x and y for each point).
+   - One-hand case: 42 features + 42 zeros = **84 features**.
+   - Two-hand case: hand 1 (42) + hand 2 (42) = **84 features**.
+   - This combined 84‑dimensional feature vector is shared by both models.
+
+4. **Two-model ensemble prediction**
+   - **ISL Skeleton model (RandomForest)** runs on the 84‑dimensional feature vector.
+   - **ISL Keras landmark model (TensorFlow/Keras)** runs on the same 84 features.
+   - A combiner function compares both predictions:
+     - Prefers the Keras model (weighted confidence).
+     - Falls back to the other model if one is unavailable.
+   - The output is a predicted **class** (digits 1–9, letters A–Z) and **confidence**.
+
+5. **Temporal smoothing + WebSocket emission**
+   - Predictions are not emitted immediately; they are collected in a **sliding window** of recent frames.
+   - When one class dominates the window (above a stability threshold) and confidence is high enough, that class is considered **stable**.
+   - Stable predictions are:
+     - Converted to display text (`"C"` → space, others → characters).
+     - Emitted over **Socket.IO** as a `prediction` event with:
+       - `text`, `confidence`, `model`, `num_hands`, `stability`, and raw `gesture`.
+     - Logged to `prediction_log.csv` along with timestamp and user ID (if logged in).
+
+6. **Frontend text building & speech**
+   - The web client (`templates/index.html`):
+     - Receives `prediction` events via Socket.IO.
+     - Appends characters/words to a live paragraph, handling spaces and punctuation.
+     - Updates a confidence bar and word-suggestion chips (driven by `static/dictionary.json`).
+   - When you click **“Speak All”**:
+     - The full paragraph is split **word by word**.
+     - Browser speech synthesis speaks each word sequentially using your selected speed.
+
+On top of this core pipeline, the app adds:
+
+- **Authentication** (signup, login, logout) backed by SQLite (`app.db`) and session cookies.
+- A modern, responsive UI for both the **landing page** and the **live recognition app**.
+
 ## 🏗️ Architecture
 
 ### System Overview
@@ -206,7 +257,7 @@ Frontend Display
 - pip (Python package manager)
 - Git (for cloning repository)
 
-## 📦 Installation
+## 📦 Installation (Step-by-step)
 
 #### Step 1: Clone the Repository
 
@@ -235,7 +286,16 @@ source venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### Step 4: Verify Installation
+### Step 4: First-time setup
+
+This project now includes:
+
+- **User authentication** (signup, login, logout) using SQLite (`app.db`)
+- **Prediction logging** to a CSV file (`prediction_log.csv`) for later analysis
+
+All required files are created automatically on first run; you do **not** need to create any tables or CSV files by hand.
+
+### Step 5: Verify Installation (optional)
 
 ```bash
 python -c "import cv2, mediapipe, flask, tensorflow; print('All dependencies installed successfully!')"
@@ -332,36 +392,207 @@ The dataset visualization image (shown at the top of this README) displays a gri
 - **Test Split**: 10%
 - **Checkpointing**: Best model saved every epoch, periodic checkpoints every 5 epochs
 
-## 🚀 Usage
+## 🧮 How the algorithm & training work
 
-### Starting the Application
+### Algorithm (inference) in short
+
+- **Input**: Single RGB frame from webcam.
+- **Hand landmarks**: MediaPipe Hands detects up to 2 hands and returns 21 landmarks per hand.
+- **Feature vector**: Landmarks are normalized and flattened into an 84‑D vector:
+  - Single hand: 42 features (x, y for 21 points) + 42 zeros.
+  - Two hands: 42 features per hand → 42 + 42 = 84.
+- **Model outputs**:
+  - **Keras landmark model**: 35‑way softmax over \( \{1,\dots,9,A,\dots,Z\} \).
+  - **RandomForest skeleton model**: 35‑class probability distribution over the same labels.
+- **Ensemble logic**:
+  - If only one model is available, use it directly.
+  - If both are available, boost the Keras confidence and pick the class with higher (possibly weighted) confidence.
+- **Temporal smoothing**:
+  - Maintain a window of the last \(N\) predictions (default \(N = 5\)).
+  - Let \(c^\*\) be the most frequent class in the window, with count \(k\).
+  - Define **stability** as:
+    \[
+    \text{stability} = \frac{k}{N}
+    \]
+  - Only if \(\text{stability} \ge 0.6\) and confidence \(\ge 0.75\) do we emit \(c^\*\) to the frontend.
+
+### Training pipeline (how the model was trained)
+
+1. **Dataset preparation**
+   - All images are stored under `Indian/` in 35 class folders (digits 1–9, letters A–Z).
+   - For each image:
+     - MediaPipe Hands extracts landmarks.
+     - Landmarks are normalized and converted into the same 84‑D feature vector used at inference time.
+   - The dataset is then split into:
+     - **Training set**: ~70%
+     - **Validation set**: 20%
+     - **Test set**: 10%
+
+2. **Model optimization objective**
+   - The Keras model outputs a probability vector \(p \in \mathbb{R}^{35}\) (softmax).
+   - Ground‑truth labels are one‑hot encoded vectors \(y\).
+   - The **categorical cross‑entropy loss** minimized during training is:
+     \[
+     \mathcal{L} = -\frac{1}{N} \sum_{i=1}^{N} \sum_{c=1}^{35} y_{i,c} \log p_{i,c}
+     \]
+   - Optimization uses the **Adam** optimizer with learning rate \(10^{-3}\), plus early stopping and learning‑rate scheduling (see `train_indian_model.py`).
+
+3. **Accuracy metrics**
+   - **Top‑1 accuracy** (reported in this README) is:
+     \[
+     \text{Top‑1 Accuracy} = \frac{\text{# predictions where } \arg\max_c p_{i,c} = \text{true class}}{\text{total # predictions}}
+     \]
+   - **Top‑3 accuracy** (also computed during experiments) is:
+     \[
+     \text{Top‑3 Accuracy} = \frac{\text{# predictions where true class is in top‑3 probabilities}}{\text{total # predictions}}
+     \]
+
+4. **Reported performance (from final trained model)**
+   - **Training accuracy**: ~99.96%
+   - **Validation accuracy**: ~100.00%
+   - **Test accuracy (Top‑1)**: ~99.88%
+   - **Top‑3 accuracy**: 100.00%
+
+These metrics are computed on the held‑out test split generated from the landmark dataset and match the values shown in the **Performance** section below.
+
+## 🚀 Usage (End-to-end flow)
+
+### 1. Start the backend
 
 1. **Activate virtual environment** (if not already active):
+
    ```bash
    # Windows
    venv\Scripts\activate
-   
+
    # Linux/macOS
    source venv/bin/activate
    ```
 
-2. **Run the Flask application**:
+2. **Run the Flask + Socket.IO server**:
+
    ```bash
    python app.py
    ```
 
-3. **Open web browser** and navigate to:
+3. Wait until you see logs like:
+
+   - `ISL Skeleton Model: [OK] Loaded`
+   - `ISL Keras Landmark Model: [OK] Loaded` (if TensorFlow and model file are available)
+   - `Running in Docker: False/True`
+   - `Debug mode: True/False`
+
+   and optionally camera backend messages such as:
+
+   - `Trying to open camera at index 0 using backend: CAP_DSHOW`
+   - `[OK] Camera opened successfully at index 0`
+
+### 2. Open the landing page
+
+1. In your browser, go to:
+
    ```
    http://localhost:5000
    ```
 
-### Using the Web Interface
+2. You will see the **SignSpeak landing page** (`templates/lander.html`) with:
 
-1. **Allow camera access** when prompted by the browser
-2. **Position your hand** in front of the camera
-3. **Make sign language gestures** - predictions will appear in real-time
-4. **Switch models** using the model selector (if both models are available)
-5. **View confidence scores** displayed with each prediction
+   - A short explanation of the app
+   - A CTA button like **“Sign in to try it”**
+
+3. Click **“Sign in to try it”** to go to the **login** screen.
+
+### 3. Create an account (signup)
+
+1. On the login screen, click **“Create an account”** to open the signup page.
+2. Fill in:
+
+   - **Email address**
+   - **Password** (minimum 6 characters)
+   - **Confirm password**
+
+3. Submit the form:
+
+   - A new user is created in the local SQLite database (`app.db`, table `users`).
+   - Passwords are stored as **hashed values** using `werkzeug.security.generate_password_hash`.
+   - You are automatically logged in and redirected to the **main app** at `/app`.
+
+> You only need to sign up once per email. On future visits you can just sign in.
+
+### 4. Sign in and log out
+
+- **Sign in**
+  1. Open `http://localhost:5000/login`.
+  2. Enter the email and password you used at signup.
+  3. On success you are redirected to `/app` (main SignSpeak interface).
+
+- **Log out**
+  - From the `/app` page (`templates/index.html`), use the **Logout** button in the top-right header.
+  - This calls the `/logout` route, clears the session and sends you back to the landing page.
+
+> The `/app` route is **protected**: if you are not logged in it will redirect you to `/login?next=/app`.
+
+### 5. Use the live recognition interface
+
+Once you are logged in and on `/app`:
+
+1. **Allow camera access** when your browser asks for permission.
+2. In the left **camera panel** you will see:
+
+   - A DSLR-style camera frame streaming from `/video_feed`.
+   - A “Hand Tracking Active” status box.
+   - Optional lighting hints if the scene is too dark.
+
+3. In the right **text output panel** you will see:
+
+   - A **timestamp** (current time and weekday).
+   - A **paragraph area** where recognized text appears as you sign.
+   - A **confidence meter** with color-coded bar (Excellent / Good / Fair).
+   - **Word suggestions** chips that adapt as you build words.
+   - Buttons:
+     - **Speak All** – uses browser speech synthesis to read the entire recognized text, **word by word**.
+     - **Pause / Resume** – controls speech playback.
+     - **Clear** – clears the recognized text area.
+
+4. **Make Indian Sign Language gestures** in front of the camera:
+
+   - MediaPipe detects up to **two hands**.
+   - Landmarks are processed and combined into **84 features**.
+   - Both **Keras landmark model** and **RandomForest skeleton model** run, then a combined prediction is chosen.
+   - A temporal smoothing window ensures only stable gestures are emitted to the frontend.
+
+5. Each stable gesture:
+
+   - Is sent to the browser over Socket.IO as a `prediction` event.
+   - Is appended to the paragraph as text.
+   - Updates the confidence bar and word suggestions.
+
+6. Special mapping:
+
+   - A specific gesture (based on left-hand open palm, mapped to class `C`) is treated as a **space** between words.
+
+### 6. How predictions are stored (CSV logging)
+
+For each **stable prediction** that is emitted to the client, the backend also writes a row to `prediction_log.csv` in the project root. This is useful for analytics, debugging and dataset building.
+
+Each row contains:
+
+- `timestamp` – server-side time of the event.
+- `user_id` – ID of the logged-in user (from `app.db`), if available.
+- `gesture` – the raw predicted class (e.g. `A`, `B`, `C`).
+- `text_emitted` – what the frontend actually receives (`'A'` or space).
+- `confidence` – model confidence for this gesture.
+- `model` – which model “won” (`ISL-Keras` or `ISL-Skeleton`).
+- `num_hands` – 0, 1 or 2.
+- `stability` – how consistent the prediction was in the smoothing window (e.g. `80%`).
+
+You can open `prediction_log.csv` in Excel, Google Sheets or use pandas:
+
+```python
+import pandas as pd
+df = pd.read_csv("prediction_log.csv")
+print(df.head())
+```
 
 ### Model Usage
 
@@ -449,8 +680,24 @@ sign-to-text-and-speech/
 ### HTTP Endpoints
 
 **`GET /`**
-- **Purpose**: Serve main web interface
-- **Response**: HTML page
+- **Purpose**: Serve the landing page (`templates/lander.html`)
+- **Response**: HTML page with marketing content and “Sign in” CTA
+
+**`GET /login`**
+- **Purpose**: Render login form
+- **Response**: HTML page; on POST validates credentials and logs user in
+
+**`GET /signup`**
+- **Purpose**: Render signup form
+- **Response**: HTML page; on POST creates a new user and logs them in
+
+**`GET /logout`**
+- **Purpose**: Clear the session and log the user out
+- **Response**: Redirects to `/`
+
+**`GET /app`**
+- **Purpose**: Main protected web interface
+- **Auth**: Requires valid session; otherwise redirects to `/login?next=/app`
 
 **`GET /video_feed`**
 - **Purpose**: MJPEG video stream
