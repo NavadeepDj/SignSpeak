@@ -88,6 +88,46 @@
             background: var(--danger-color);
         }
 
+        /* User Section */
+        .user-section {
+            display: flex;
+            align-items: center;
+        }
+
+        .user-greeting {
+            color: var(--text-light);
+            font-size: 0.9rem;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .user-greeting i {
+            font-size: 1.2rem;
+            color: var(--primary-color);
+        }
+
+        .btn-logout {
+            background: white;
+            border: 1px solid var(--border-color);
+            color: var(--text-dark);
+            padding: 0.5rem 1rem;
+            border-radius: 8px;
+            font-size: 0.85rem;
+            font-weight: 500;
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            text-decoration: none;
+            transition: all 0.2s ease;
+        }
+
+        .btn-logout:hover {
+            background: #fef2f2;
+            border-color: #fecaca;
+            color: #dc2626;
+        }
+
         /* Main Container */
         .main-wrapper {
             display: flex;
@@ -560,6 +600,16 @@
                         <i class="fas fa-circle"></i>
                         <span id="statusText">Active</span>
                     </span>
+                </div>
+                <div class="user-section d-flex align-items-center gap-3">
+                    <span class="user-greeting">
+                        <i class="fas fa-user-circle"></i>
+                        <span>{{ user_name }}</span>
+                    </span>
+                    <a href="/logout" class="btn-logout" title="Sign out">
+                        <i class="fas fa-sign-out-alt"></i>
+                        <span class="d-none d-md-inline">Sign out</span>
+                    </a>
                 </div>
             </div>
         </div>

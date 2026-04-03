@@ -32,8 +32,12 @@ import numpy as np
 import pandas as pd
 from tensorflow import keras
 
-from flask import Flask, render_template, Response, request, jsonify
+from flask import Flask, render_template, Response, request, jsonify, redirect, url_for, session
 from flask_socketio import SocketIO, emit
+from functools import wraps
+import csv
+import hashlib
+from datetime import datetime
 
 # -----------------------------
 #  SUPPRESS WARNINGS
@@ -62,8 +66,93 @@ except ImportError:
 #   FLASK + SOCKET
 # -----------------------------
 app = Flask(__name__)
-app.config['SECRET_KEY'] = 'secret!'
+app.config['SECRET_KEY'] = 'signspeak-secret-key-2026!'
 socketio = SocketIO(app, cors_allowed_origins="*")
+
+# -----------------------------
+#   USER DATABASE (CSV)
+# -----------------------------
+USERS_CSV_PATH = './data/users.csv'
+
+def ensure_users_csv():
+    """Create users CSV file with headers if it doesn't exist."""
+    os.makedirs(os.path.dirname(USERS_CSV_PATH), exist_ok=True)
+    if not os.path.exists(USERS_CSV_PATH):
+        with open(USERS_CSV_PATH, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            writer.writerow(['id', 'username', 'email', 'password_hash', 'created_at'])
+        print(f"[OK] Created users database at {USERS_CSV_PATH}")
+
+def hash_password(password):
+    """Hash password using SHA-256."""
+    return hashlib.sha256(password.encode()).hexdigest()
+
+def get_all_users():
+    """Read all users from CSV."""
+    ensure_users_csv()
+    users = []
+    try:
+        with open(USERS_CSV_PATH, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            users = list(reader)
+    except Exception as e:
+        print(f"[ERROR] Failed to read users: {e}")
+    return users
+
+def find_user_by_email(email):
+    """Find a user by email address."""
+    users = get_all_users()
+    for user in users:
+        if user['email'].lower() == email.lower():
+            return user
+    return None
+
+def create_user(username, email, password):
+    """Create a new user and save to CSV."""
+    ensure_users_csv()
+    users = get_all_users()
+    
+    # Generate new ID
+    new_id = 1
+    if users:
+        new_id = max(int(u['id']) for u in users) + 1
+    
+    # Create user record
+    new_user = {
+        'id': new_id,
+        'username': username,
+        'email': email.lower(),
+        'password_hash': hash_password(password),
+        'created_at': datetime.now().isoformat()
+    }
+    
+    # Append to CSV
+    with open(USERS_CSV_PATH, 'a', newline='', encoding='utf-8') as f:
+        writer = csv.writer(f)
+        writer.writerow([new_user['id'], new_user['username'], new_user['email'], 
+                        new_user['password_hash'], new_user['created_at']])
+    
+    print(f"[OK] Created new user: {email}")
+    return new_user
+
+def verify_user(email, password):
+    """Verify user credentials."""
+    user = find_user_by_email(email)
+    if user and user['password_hash'] == hash_password(password):
+        return user
+    return None
+
+def login_required(f):
+    """Decorator to require login for routes."""
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if 'user_id' not in session:
+            return redirect(url_for('login', next=request.url))
+        return f(*args, **kwargs)
+    return decorated_function
+
+# Initialize users CSV on startup
+ensure_users_csv()
 
 # -----------------------------
 #   MODEL PATHS
@@ -243,10 +332,73 @@ def lander():
     return render_template('lander.html')
 
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    """Login page and authentication."""
+    error = None
+    success = request.args.get('success')
+    
+    if request.method == 'POST':
+        email = request.form.get('email', '').strip()
+        password = request.form.get('password', '')
+        
+        user = verify_user(email, password)
+        if user:
+            session['user_id'] = user['id']
+            session['user_email'] = user['email']
+            session['user_name'] = user['username']
+            
+            # Redirect to next page or app
+            next_page = request.args.get('next') or request.form.get('next')
+            if next_page and next_page.startswith('/'):
+                return redirect(next_page)
+            return redirect(url_for('index'))
+        else:
+            error = 'Invalid email or password. Please try again.'
+    
+    return render_template('login.html', error=error, success=success)
+
+
+@app.route('/signup', methods=['GET', 'POST'])
+def signup():
+    """Signup page and user registration."""
+    error = None
+    
+    if request.method == 'POST':
+        username = request.form.get('username', '').strip()
+        email = request.form.get('email', '').strip()
+        password = request.form.get('password', '')
+        confirm_password = request.form.get('confirm_password', '')
+        
+        # Validation
+        if not username or not email or not password:
+            error = 'All fields are required.'
+        elif len(password) < 6:
+            error = 'Password must be at least 6 characters long.'
+        elif password != confirm_password:
+            error = 'Passwords do not match.'
+        elif find_user_by_email(email):
+            error = 'An account with this email already exists.'
+        else:
+            # Create user
+            create_user(username, email, password)
+            return redirect(url_for('login', success='Account created successfully! Please sign in.'))
+    
+    return render_template('signup.html', error=error)
+
+
+@app.route('/logout')
+def logout():
+    """Log out the current user."""
+    session.clear()
+    return redirect(url_for('lander'))
+
+
 @app.route('/app')
+@login_required
 def index():
-    """Main SignSpeak application UI."""
-    return render_template('index.html')
+    """Main SignSpeak application UI (requires login)."""
+    return render_template('index.html', user_name=session.get('user_name', 'User'))
 
 
 @app.route('/api/status')
