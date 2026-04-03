@@ -602,12 +602,7 @@
                 </div>
             </div>
 
-            <div style="display: flex; gap: 1rem; align-items: center;">
-                <button class="practice-mode-btn">
-                    <i class="fas fa-graduation-cap"></i>
-                    Practice Mode
-                </button>
-            </div>
+
 
             <div class="lighting-warning hidden" id="lightingWarning">
                 <div>
@@ -625,7 +620,6 @@
         <div class="text-panel">
             <div class="panel-tabs">
                 <button class="tab-btn active" onclick="switchTab('live')">Live</button>
-                <button class="tab-btn" onclick="switchTab('manual')">Manual</button>
             </div>
 
             <div class="panel-controls">
@@ -704,6 +698,33 @@
         let currentConfidence = 85;
         let paragraphText = '';
         let wordDictionary = [];
+        let cachedVoice = null;
+        
+        // Speech state tracking for proper pause/resume
+        let isSpeaking = false;
+        let isPaused = false;
+        let fullText = '';           // The complete text
+        let words = [];              // Array of words
+        let currentWordIndex = 0;    // Which word we're on
+        let speechRate = 1.0;
+
+        // Pre-load and cache voices (eliminates lag on first "Speak All" click)
+        function loadVoices() {
+            const voices = speechSynthesis.getVoices();
+            if (voices.length > 0) {
+                cachedVoice = voices.find(voice =>
+                    voice.name.includes('English') &&
+                    (voice.name.includes('Female') || voice.name.includes('US'))
+                ) || voices.find(voice => voice.lang.startsWith('en')) || voices[0];
+                console.log('Voice loaded:', cachedVoice ? cachedVoice.name : 'default');
+            }
+        }
+        
+        // Load voices immediately and on change
+        loadVoices();
+        if (speechSynthesis.onvoiceschanged !== undefined) {
+            speechSynthesis.onvoiceschanged = loadVoices;
+        }
 
         // Load word dictionary
         fetch('/static/dictionary.json')
@@ -932,31 +953,115 @@
             }
         }
 
-        // Helper: speak text as complete words (not letter by letter)
-        function speakText(text) {
-            if (!text || text.trim().length === 0) return;
+        // Speak words starting from a specific word index
+        function speakFromWordIndex(wordArray, startIndex = 0) {
+            if (!wordArray || wordArray.length === 0) return;
+            
+            // Get remaining words
+            const remainingWords = wordArray.slice(startIndex);
+            if (remainingWords.length === 0) {
+                resetSpeechState();
+                return;
+            }
 
+            // Cancel any ongoing speech
             speechSynthesis.cancel();
 
-            const rate = parseFloat(document.getElementById('speedSelect').value);
-            const voices = speechSynthesis.getVoices();
-            const preferredVoice = voices.find(voice =>
-                voice.name.includes('English') &&
-                (voice.name.includes('Female') || voice.name.includes('US'))
-            ) || voices.find(voice => voice.lang.startsWith('en')) || voices[0];
+            isSpeaking = true;
+            isPaused = false;
+            currentWordIndex = startIndex;
+            speechRate = parseFloat(document.getElementById('speedSelect').value);
 
-            // Speak the entire text as one utterance - speech synthesis will naturally
-            // pronounce words properly (e.g., "HELLO" as "hello", not "H-E-L-L-O")
-            const utterance = new SpeechSynthesisUtterance(text.trim());
-            utterance.rate = rate;
+            const textToSpeak = remainingWords.join(' ');
+            const utterance = new SpeechSynthesisUtterance(textToSpeak);
+            utterance.rate = speechRate;
             utterance.pitch = 1.0;
             utterance.volume = 1.0;
 
-            if (preferredVoice) {
-                utterance.voice = preferredVoice;
+            if (cachedVoice) {
+                utterance.voice = cachedVoice;
             }
 
+            // Track word boundaries
+            let localWordCount = 0;
+            utterance.onboundary = function(event) {
+                if (event.name === 'word') {
+                    localWordCount++;
+                    currentWordIndex = startIndex + localWordCount;
+                }
+            };
+
+            // Reset state when speech ends
+            utterance.onend = function() {
+                resetSpeechState();
+            };
+
+            // Handle errors (but not when we intentionally cancel)
+            utterance.onerror = function(e) {
+                if (e.error !== 'interrupted' && e.error !== 'canceled') {
+                    console.error('Speech error:', e.error);
+                    resetSpeechState();
+                }
+            };
+
             speechSynthesis.speak(utterance);
+            
+            // Fallback: estimate word position based on time if onboundary doesn't work
+            const avgWordDuration = 300 / speechRate; // ~300ms per word at normal speed
+            const wordTracker = setInterval(() => {
+                if (!isSpeaking || isPaused) {
+                    clearInterval(wordTracker);
+                    return;
+                }
+                // Increment word index based on time elapsed
+                if (currentWordIndex < startIndex + remainingWords.length - 1) {
+                    currentWordIndex++;
+                }
+            }, avgWordDuration);
+        }
+
+        // Reset speech state and UI
+        function resetSpeechState() {
+            isSpeaking = false;
+            isPaused = false;
+            fullText = '';
+            words = [];
+            currentWordIndex = 0;
+            const pauseBtn = document.getElementById('pauseButton');
+            if (pauseBtn) {
+                pauseBtn.innerHTML = '<i class="fas fa-pause"></i>';
+            }
+        }
+
+        // Main speak function - starts from beginning
+        function speakText(text) {
+            if (!text || text.trim().length === 0) return;
+            
+            fullText = text.trim();
+            words = fullText.split(/\s+/); // Split into words
+            currentWordIndex = 0;
+            
+            speakFromWordIndex(words, 0);
+        }
+
+        // Pause speech and save position
+        function pauseSpeech() {
+            if (isSpeaking && !isPaused) {
+                speechSynthesis.cancel(); // Stop speaking
+                isPaused = true;
+                isSpeaking = false;
+                document.getElementById('pauseButton').innerHTML = '<i class="fas fa-play"></i>';
+                console.log('Paused at word index:', currentWordIndex, 'Word:', words[currentWordIndex]);
+            }
+        }
+
+        // Resume speech from saved position
+        function resumeSpeech() {
+            if (isPaused && words.length > 0) {
+                console.log('Resuming from word index:', currentWordIndex, 'Word:', words[currentWordIndex]);
+                speakFromWordIndex(words, currentWordIndex);
+                document.getElementById('pauseButton').innerHTML = '<i class="fas fa-pause"></i>';
+            }
         }
 
         // Speak All button - speaks words naturally
@@ -968,17 +1073,20 @@
                 return;
             }
             
+            // Reset state and start fresh
+            resetSpeechState();
             speakText(allText);
         });
 
-        // Pause button
-        document.getElementById('pauseButton').addEventListener('click', function() {
-            if (speechSynthesis.speaking) {
-                speechSynthesis.pause();
-                this.innerHTML = '<i class="fas fa-play"></i>';
-            } else if (speechSynthesis.paused) {
-                speechSynthesis.resume();
-                this.innerHTML = '<i class="fas fa-pause"></i>';
+        // Pause/Resume button - properly continues from where it stopped
+        const pauseButton = document.getElementById('pauseButton');
+        pauseButton.addEventListener('click', function() {
+            if (isPaused) {
+                // Currently paused -> resume from saved position
+                resumeSpeech();
+            } else if (isSpeaking) {
+                // Currently speaking -> pause and save position
+                pauseSpeech();
             }
         });
 
@@ -989,10 +1097,6 @@
             }
         });
 
-        // Load voices
-        if (speechSynthesis.onvoiceschanged !== undefined) {
-            speechSynthesis.onvoiceschanged = () => {};
-        }
     </script>
 
 </body>
